@@ -1,13 +1,17 @@
 package org.javers.repository.mongo;
 
 import com.mongodb.BasicDBObject;
+import com.mongodb.Block;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import org.bson.Document;
+import org.javers.core.metamodel.type.ManagedType;
 import org.javers.repository.mongo.model.MongoHeadId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -77,6 +81,21 @@ class MongoSchemaManager {
     MongoCollection<Document> snapshotsCollection() {
         return mongo.getCollection(SNAPSHOTS);
     }
+
+    MongoCollection<Document> snapshotCollectionForType(String typeName){
+        return mongo.getCollection("jv_snapshots_" + typeName);
+    }
+
+    List<MongoCollection<Document>> allSnapshotCollections(){
+        List<MongoCollection<Document>> snapshotCollections = new ArrayList<>();
+        mongo.listCollectionNames().forEach((Block<String>) name -> {
+            if(name.contains(("jv_snapshots"))){
+                snapshotCollections.add(mongo.getCollection(name));
+            }
+        });
+        return snapshotCollections;
+    }
+
 
     MongoCollection<Document> headCollection() {
         return mongo.getCollection(MongoHeadId.COLLECTION_NAME);

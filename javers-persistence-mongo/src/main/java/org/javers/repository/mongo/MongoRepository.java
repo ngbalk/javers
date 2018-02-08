@@ -7,16 +7,19 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
+import io.github.lukehutch.fastclasspathscanner.utils.ReflectionUtils;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import java.util.Optional;
+
+import org.javers.common.reflection.ReflectionUtil;
 import org.javers.common.string.RegexEscape;
 import org.javers.core.commit.Commit;
 import org.javers.core.commit.CommitId;
 import org.javers.core.json.JsonConverter;
 import org.javers.core.json.typeadapter.util.UtilTypeCoreAdapters;
-import org.javers.core.metamodel.object.CdoSnapshot;
-import org.javers.core.metamodel.object.GlobalId;
+import org.javers.core.metamodel.annotation.PersistenceLocation;
+import org.javers.core.metamodel.object.*;
 import org.javers.core.metamodel.type.EntityType;
 import org.javers.core.metamodel.type.ManagedType;
 import org.javers.core.metamodel.type.ValueObjectType;
@@ -25,7 +28,8 @@ import org.javers.repository.api.QueryParams;
 import org.javers.repository.api.QueryParamsBuilder;
 import org.javers.repository.api.SnapshotIdentifier;
 import org.javers.repository.mongo.model.MongoHeadId;
-import java.time.LocalDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -40,6 +44,8 @@ import static org.javers.repository.mongo.MongoSchemaManager.*;
  * @author pawel szymczyk
  */
 public class MongoRepository implements JaversRepository {
+    private boolean isMultiSnapshotCollections = false;
+    private static Logger logger = LoggerFactory.getLogger(MongoRepository.class);
     private final static int DEFAULT_CACHE_SIZE = 5000;
 
     private static final int DESC = -1;
@@ -72,7 +78,8 @@ public class MongoRepository implements JaversRepository {
     }
 
     void clean(){
-        snapshotsCollection().deleteMany(new Document());
+        snapshotCollection().deleteMany(new Document());
+        mongoSchemaManager.allSnapshotCollections().stream().forEach(coll -> coll.deleteMany(new Document()));
         headCollection().deleteMany(new Document());
     }
 
@@ -107,7 +114,6 @@ public class MongoRepository implements JaversRepository {
     public List<CdoSnapshot> getValueObjectStateHistory(EntityType ownerEntity, String path, QueryParams queryParams) {
         BasicDBObject query = new BasicDBObject(GLOBAL_ID_OWNER_ID_ENTITY, ownerEntity.getName());
         query.append(GLOBAL_ID_FRAGMENT, path);
-
         return queryForSnapshots(query, Optional.of(queryParams));
     }
 
@@ -194,8 +200,12 @@ public class MongoRepository implements JaversRepository {
         return dbObject;
     }
 
-    private MongoCollection<Document> snapshotsCollection() {
+    private MongoCollection<Document> snapshotCollection() {
         return mongoSchemaManager.snapshotsCollection();
+    }
+
+    private MongoCollection<Document> snapshotCollection(String targetTypeName) {
+        return mongoSchemaManager.snapshotCollectionForType(targetTypeName);
     }
 
     private MongoCollection<Document> headCollection() {
@@ -203,11 +213,13 @@ public class MongoRepository implements JaversRepository {
     }
 
     private void persistSnapshots(Commit commit) {
-        MongoCollection<Document> collection = snapshotsCollection();
-        commit.getSnapshots().forEach(snapshot -> {
+        MongoCollection<Document> collection;
+        for(CdoSnapshot snapshot : commit.getSnapshots()){
+            collection = isMultiSnapshotCollections ? snapshotCollection(getAnnotatedCollectionName(snapshot))
+                    : snapshotCollection();
             collection.insertOne(writeToDBObject(snapshot));
             cache.put(snapshot);
-        });
+        }
     }
 
     private void persistHeadId(Commit commit) {
@@ -227,11 +239,21 @@ public class MongoRepository implements JaversRepository {
         return Filters.eq(OBJECT_ID, document.getObjectId("_id"));
     }
 
-    private MongoCursor<Document> getMongoSnapshotsCursor(Bson query, Optional<QueryParams> queryParams) {
-        FindIterable<Document> findIterable = snapshotsCollection()
-            .find(applyQueryParams(query, queryParams))
-            .sort(new Document(COMMIT_ID, DESC));
-        return applyQueryParams(findIterable, queryParams).iterator();
+    private List<MongoCursor<Document>> getMongoSnapshotsCursors(Bson query, Optional<QueryParams> queryParams) {
+        List<MongoCursor<Document>> cursors = new ArrayList<>();
+        List<MongoCollection<Document>> collections = isMultiSnapshotCollections ? allSnaphotCollections()
+                : Collections.singletonList(snapshotCollection());
+        for(MongoCollection<Document> collection : collections){
+            FindIterable<Document> findIterable = collection
+                    .find(applyQueryParams(query, queryParams))
+                    .sort(new Document(COMMIT_ID, DESC));
+            cursors.add(applyQueryParams(findIterable, queryParams).iterator());
+        }
+        return cursors;
+    }
+
+    private List<MongoCollection<Document>> allSnaphotCollections() {
+        return mongoSchemaManager.allSnapshotCollections();
     }
 
     private Bson applyQueryParams(Bson query, Optional<QueryParams> queryParams) {
@@ -294,28 +316,50 @@ public class MongoRepository implements JaversRepository {
 
     private Optional<CdoSnapshot> getLatest(Bson idQuery) {
         QueryParams queryParams = QueryParamsBuilder.withLimit(1).build();
-        MongoCursor<Document> mongoLatest = getMongoSnapshotsCursor(idQuery, Optional.of(queryParams));
-
+        List<MongoCursor<Document>> mongoLatest = getMongoSnapshotsCursors(idQuery, Optional.of(queryParams));
         return getOne(mongoLatest).map(d -> readFromDBObject(d));
     }
 
     private List<CdoSnapshot> queryForSnapshots(Bson query, Optional<QueryParams> queryParams) {
         List<CdoSnapshot> snapshots = new ArrayList<>();
-        try (MongoCursor<Document> mongoSnapshots = getMongoSnapshotsCursor(query, queryParams)) {
-            while (mongoSnapshots.hasNext()) {
-                Document dbObject = mongoSnapshots.next();
-                snapshots.add(readFromDBObject(dbObject));
+        List<MongoCursor<Document>> mongoSnapshotsCursors = getMongoSnapshotsCursors(query, queryParams);
+            for(MongoCursor<Document> cursor :  mongoSnapshotsCursors){
+                while (cursor.hasNext()) {
+                    Document dbObject = cursor.next();
+                    snapshots.add(readFromDBObject(dbObject));
+                }
             }
-            return snapshots;
+        snapshots.sort(Comparator.comparing(CdoSnapshot::getCommitId).reversed());
+        return snapshots;
+    }
+
+    private String getAnnotatedCollectionName(CdoSnapshot type) {
+        String rootClassName;
+        if(type.getGlobalId() instanceof ValueObjectId){
+            rootClassName = ((ValueObjectId) type.getGlobalId()).getOwnerId().getTypeName();
+        }
+        else {
+            rootClassName = type.getGlobalId().getTypeName();
+        }
+        try {
+            return (String) ReflectionUtil.getAnnotationValue(Class.forName(rootClassName).getAnnotation(PersistenceLocation.class), "value");
+        } catch (Exception e) {
+            logger.warn("Unable to find annotated collection or table name for persisting type: {}. Using reasonable default instead.", type.getGlobalId().getTypeName());
+            String[] pieces = rootClassName.split("\\.");
+            return pieces[pieces.length-1].toLowerCase();
         }
     }
 
-    private static <T> Optional<T> getOne(MongoCursor<T> mongoCursor){
+    private static <T> Optional<T> getOne(List<MongoCursor<T>> mongoCursors){
+        if(mongoCursors.isEmpty()){
+            return Optional.empty();
+        }
+        MongoCursor<T> mongoCursor = mongoCursors.get(0);
         try{
             if (!mongoCursor.hasNext()) {
                 return Optional.empty();
             }
-            return Optional.of(mongoCursor.next());
+            return Optional.of((T) mongoCursor.next());
         }
         finally {
             mongoCursor.close();
@@ -325,5 +369,9 @@ public class MongoRepository implements JaversRepository {
     //enables index range scan
     private static Bson prefixQuery(String fieldName, String prefix){
         return Filters.regex(fieldName, "^" + RegexEscape.escape(prefix) + ".*");
+    }
+
+    public void setMultiSnapshotCollections(boolean multiSnapshotCollections) {
+        this.isMultiSnapshotCollections = multiSnapshotCollections;
     }
 }
