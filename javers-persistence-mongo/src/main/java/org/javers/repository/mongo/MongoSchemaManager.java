@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * @author bartosz.walacik
@@ -80,6 +81,12 @@ class MongoSchemaManager {
 
     MongoCollection<Document> snapshotsCollection() {
         return mongo.getCollection(SNAPSHOTS);
+    }
+
+    List<MongoCollection<Document>> snapshotCollectionForTypes(List<String> typeNames){
+        return typeNames.stream()
+                .map(typeName -> mongo.getCollection("jv_snapshots_"+typeName))
+                .collect(Collectors.toList());
     }
 
     MongoCollection<Document> snapshotCollectionForType(String typeName){

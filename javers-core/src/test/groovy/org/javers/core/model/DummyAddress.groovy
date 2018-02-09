@@ -1,5 +1,7 @@
 package org.javers.core.model
 
+import org.javers.core.metamodel.annotation.PersistenceLocation
+
 import javax.persistence.Transient
 
 /**
@@ -7,6 +9,7 @@ import javax.persistence.Transient
  *
  * @author bartosz walacik
  */
+@PersistenceLocation(value = "snapshot_entity")
 class DummyAddress extends AbstractDummyAddress{
     public enum Kind {HOME, OFFICE}
 

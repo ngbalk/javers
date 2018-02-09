@@ -1,6 +1,8 @@
 package org.javers.core.model
 
 import org.javers.core.metamodel.annotation.DiffIgnore
+import org.javers.core.metamodel.annotation.PersistenceLocation
+
 import java.time.LocalDateTime
 import javax.persistence.Id
 import javax.persistence.Transient
@@ -8,6 +10,7 @@ import javax.persistence.Transient
 /**
  * @author bartosz walacik
  */
+@PersistenceLocation(value = "dummy_user")
 class DummyUser extends AbstractDummyUser {
     public enum Sex {FEMALE, MALE, OCCASIONALLY}
 

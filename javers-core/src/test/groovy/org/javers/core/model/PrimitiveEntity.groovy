@@ -1,6 +1,7 @@
 package org.javers.core.model
 
 import groovy.transform.EqualsAndHashCode
+import org.javers.core.metamodel.annotation.PersistenceLocation
 
 import javax.persistence.Id
 
@@ -8,6 +9,7 @@ import javax.persistence.Id
  * @author bartosz walacik
  */
 @EqualsAndHashCode
+@PersistenceLocation(value = "primitive_entity")
 class PrimitiveEntity {
     @Id
     private String   id = "a"

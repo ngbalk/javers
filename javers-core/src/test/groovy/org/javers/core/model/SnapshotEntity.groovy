@@ -3,6 +3,7 @@ package org.javers.core.model
 import com.google.common.collect.Multimap
 import com.google.common.collect.Multiset
 import groovy.transform.EqualsAndHashCode
+import org.javers.core.metamodel.annotation.PersistenceLocation
 
 import java.time.LocalDate
 
@@ -12,6 +13,7 @@ import javax.persistence.Id
  * @author bartosz walacik
  */
 @EqualsAndHashCode
+@PersistenceLocation(value = "snapshot_entity")
 class SnapshotEntity {
 
     @Id

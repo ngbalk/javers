@@ -7,7 +7,6 @@ import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoCursor;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
-import io.github.lukehutch.fastclasspathscanner.utils.ReflectionUtils;
 import org.bson.Document;
 import org.bson.conversions.Bson;
 import java.util.Optional;
@@ -30,6 +29,7 @@ import org.javers.repository.api.SnapshotIdentifier;
 import org.javers.repository.mongo.model.MongoHeadId;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import sun.tools.java.ClassType;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -91,7 +91,7 @@ public class MongoRepository implements JaversRepository {
         } else {
             query = createIdQuery(globalId);
         }
-        return queryForSnapshots(query, Optional.of(queryParams));
+        return queryForSnapshots(query, Optional.of(queryParams), null);
     }
 
     @Override
@@ -101,26 +101,26 @@ public class MongoRepository implements JaversRepository {
 
     @Override
     public List<CdoSnapshot> getSnapshots(QueryParams queryParams) {
-        return queryForSnapshots(new BasicDBObject(), Optional.of(queryParams));
+        return queryForSnapshots(new BasicDBObject(), Optional.of(queryParams), null);
     }
 
     @Override
     public List<CdoSnapshot> getSnapshots(Collection<SnapshotIdentifier> snapshotIdentifiers) {
         return snapshotIdentifiers.isEmpty() ? Collections.<CdoSnapshot>emptyList() :
-            queryForSnapshots(createSnapshotIdentifiersQuery(snapshotIdentifiers), Optional.<QueryParams>empty());
+            queryForSnapshots(createSnapshotIdentifiersQuery(snapshotIdentifiers), Optional.<QueryParams>empty(), null);
     }
 
     @Override
     public List<CdoSnapshot> getValueObjectStateHistory(EntityType ownerEntity, String path, QueryParams queryParams) {
         BasicDBObject query = new BasicDBObject(GLOBAL_ID_OWNER_ID_ENTITY, ownerEntity.getName());
         query.append(GLOBAL_ID_FRAGMENT, path);
-        return queryForSnapshots(query, Optional.of(queryParams));
+        return queryForSnapshots(query, Optional.of(queryParams), Collections.singletonList(ownerEntity));
     }
 
     @Override
     public List<CdoSnapshot> getStateHistory(Set<ManagedType> givenClasses, QueryParams queryParams) {
         Bson query = createManagedTypeQuery(givenClasses, queryParams.isAggregate());
-        return queryForSnapshots(query, Optional.of(queryParams));
+        return queryForSnapshots(query, Optional.of(queryParams), Arrays.asList(givenClasses.toArray(new ManagedType[givenClasses.size()])));
     }
 
     @Override
@@ -215,7 +215,7 @@ public class MongoRepository implements JaversRepository {
     private void persistSnapshots(Commit commit) {
         MongoCollection<Document> collection;
         for(CdoSnapshot snapshot : commit.getSnapshots()){
-            collection = isMultiSnapshotCollections ? snapshotCollection(getAnnotatedCollectionName(snapshot))
+            collection = isMultiSnapshotCollections ? snapshotCollection(getAnnotatedCollectionNameFromSnapshot(snapshot))
                     : snapshotCollection();
             collection.insertOne(writeToDBObject(snapshot));
             cache.put(snapshot);
@@ -239,10 +239,24 @@ public class MongoRepository implements JaversRepository {
         return Filters.eq(OBJECT_ID, document.getObjectId("_id"));
     }
 
-    private List<MongoCursor<Document>> getMongoSnapshotsCursors(Bson query, Optional<QueryParams> queryParams) {
+    private List<MongoCursor<Document>> getMongoSnapshotsCursors(Bson query, Optional<QueryParams> queryParams, List<ManagedType> types) {
+        List<MongoCollection<Document>> collections;
+        if(isMultiSnapshotCollections){
+            if(types == null){
+                collections = allSnaphotCollections();
+            }
+            else{
+                List<String> typeNames = types.stream()
+                        .map(ManagedType::getBaseJavaClass)
+                        .map(this::getAnnotatedCollectionNameFromClass)
+                        .collect(Collectors.toList());
+                collections = mongoSchemaManager.snapshotCollectionForTypes(typeNames);
+            }
+        }
+        else{
+            collections = Collections.singletonList(snapshotCollection());
+        }
         List<MongoCursor<Document>> cursors = new ArrayList<>();
-        List<MongoCollection<Document>> collections = isMultiSnapshotCollections ? allSnaphotCollections()
-                : Collections.singletonList(snapshotCollection());
         for(MongoCollection<Document> collection : collections){
             FindIterable<Document> findIterable = collection
                     .find(applyQueryParams(query, queryParams))
@@ -316,13 +330,13 @@ public class MongoRepository implements JaversRepository {
 
     private Optional<CdoSnapshot> getLatest(Bson idQuery) {
         QueryParams queryParams = QueryParamsBuilder.withLimit(1).build();
-        List<MongoCursor<Document>> mongoLatest = getMongoSnapshotsCursors(idQuery, Optional.of(queryParams));
+        List<MongoCursor<Document>> mongoLatest = getMongoSnapshotsCursors(idQuery, Optional.of(queryParams), null);
         return getOne(mongoLatest).map(d -> readFromDBObject(d));
     }
 
-    private List<CdoSnapshot> queryForSnapshots(Bson query, Optional<QueryParams> queryParams) {
+    private List<CdoSnapshot> queryForSnapshots(Bson query, Optional<QueryParams> queryParams, List<ManagedType> types) {
         List<CdoSnapshot> snapshots = new ArrayList<>();
-        List<MongoCursor<Document>> mongoSnapshotsCursors = getMongoSnapshotsCursors(query, queryParams);
+        List<MongoCursor<Document>> mongoSnapshotsCursors = getMongoSnapshotsCursors(query, queryParams, types);
             for(MongoCursor<Document> cursor :  mongoSnapshotsCursors){
                 while (cursor.hasNext()) {
                     Document dbObject = cursor.next();
@@ -333,7 +347,7 @@ public class MongoRepository implements JaversRepository {
         return snapshots;
     }
 
-    private String getAnnotatedCollectionName(CdoSnapshot type) {
+    private String getAnnotatedCollectionNameFromSnapshot(CdoSnapshot type) {
         String rootClassName;
         if(type.getGlobalId() instanceof ValueObjectId){
             rootClassName = ((ValueObjectId) type.getGlobalId()).getOwnerId().getTypeName();
@@ -342,11 +356,20 @@ public class MongoRepository implements JaversRepository {
             rootClassName = type.getGlobalId().getTypeName();
         }
         try {
-            return (String) ReflectionUtil.getAnnotationValue(Class.forName(rootClassName).getAnnotation(PersistenceLocation.class), "value");
-        } catch (Exception e) {
-            logger.warn("Unable to find annotated collection or table name for persisting type: {}. Using reasonable default instead.", type.getGlobalId().getTypeName());
+            return getAnnotatedCollectionNameFromClass(Class.forName(rootClassName));
+        } catch (ClassNotFoundException e) {
+            logger.warn("Unable to find class for persisting type: {}. Using reasonable default instead.", type.getGlobalId().getTypeName());
             String[] pieces = rootClassName.split("\\.");
             return pieces[pieces.length-1].toLowerCase();
+        }
+    }
+
+    private String getAnnotatedCollectionNameFromClass(Class type) {
+        try {
+            return (String) ReflectionUtil.getAnnotationValue(type.getAnnotation(PersistenceLocation.class), "value");
+        } catch (Exception e) {
+            logger.warn("Unable to find annotated collection or table name for persisting type: {}. Using reasonable default instead.", type.getName());
+            return type.getSimpleName().toLowerCase();
         }
     }
 

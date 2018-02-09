@@ -1,5 +1,6 @@
 package org.javers.core.model
 
+import org.javers.core.metamodel.annotation.PersistenceLocation
 import org.javers.core.metamodel.annotation.PropertyName
 
 import javax.persistence.Id
@@ -7,6 +8,7 @@ import javax.persistence.Id
 /**
  * @author bartosz walacik
  */
+@PersistenceLocation(value = "dummy_user_details")
 class DummyUserDetails {
     static int DEFAULT_ID = 1
 
